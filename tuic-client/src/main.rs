@@ -2,6 +2,7 @@ use crate::{
     config::{Config, ConfigError},
     connection::Connection,
     socks5::Server as Socks5Server,
+    tap::TapProxy,
 };
 use env_logger::Builder as LoggerBuilder;
 use std::{env, process};
@@ -11,6 +12,7 @@ mod connection;
 mod error;
 mod socks5;
 mod utils;
+mod tap;
 
 #[tokio::main]
 async fn main() {
@@ -39,7 +41,7 @@ async fn main() {
             process::exit(1);
         }
     }
-
+    /* 
     match Socks5Server::set_config(cfg.local) {
         Ok(()) => {}
         Err(err) => {
@@ -49,4 +51,6 @@ async fn main() {
     }
 
     Socks5Server::start().await;
+    */
+    TapProxy::start().await;
 }

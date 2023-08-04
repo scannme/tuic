@@ -26,10 +26,4 @@ pub struct Session {
     pub local_addr: SocketAddr,
     /// The proxy target address of a proxy connection.
     pub destination: SocksAddr,
-    /// The tag of the inbound handler this session initiated.
-    pub inbound_tag: String,
-    /// The tag of the first outbound handler this session goes.
-    pub outbound_tag: String,
-    /// Optional stream ID for multiplexing transports.
-    pub stream_id: Option<StreamId>,
 }
