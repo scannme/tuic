@@ -1,5 +1,10 @@
 use super::Connection;
-use crate::{error::Error, socks5::UDP_SESSIONS as SOCKS5_UDP_SESSIONS, utils::UdpRelayMode};
+use crate::{error::Error, 
+    socks5::UDP_SESSIONS as SOCKS5_UDP_SESSIONS,
+    utils::UdpRelayMode,
+    tap,
+};
+use std::net::SocketAddr;
 use bytes::Bytes;
 use quinn::ZeroRttAccepted;
 use socks5_proto::Address as Socks5Address;
@@ -7,6 +12,8 @@ use std::time::Duration;
 use tokio::time;
 use tuic::Address;
 use tuic_quinn::{Connect, Packet};
+use std::sync::Arc;
+
 
 impl Connection {
     pub async fn authenticate(self, zero_rtt_accepted: Option<ZeroRttAccepted>) {
@@ -120,7 +127,13 @@ impl Connection {
         match pkt.accept().await {
             Ok(Some((pkt, addr, _))) => {
                 log::info!("[relay] [packet] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] from {addr}");
+                println!("[relay] [packet] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] from {addr}");
+                if let Address::SocketAddress(addr) = addr {
+                    println!("handle_udp_inbound_datagram {addr}");
+                    tap::handle_udp_inbound_datagram(pkt, addr).await;
+                }
 
+            /* 
                 let addr = match addr {
                     Address::None => unreachable!(),
                     Address::DomainAddress(domain, port) => {
@@ -129,6 +142,7 @@ impl Connection {
                     Address::SocketAddress(addr) => Socks5Address::SocketAddress(addr),
                 };
 
+               
                 let session = SOCKS5_UDP_SESSIONS
                     .get()
                     .unwrap()
@@ -145,6 +159,8 @@ impl Connection {
                 } else {
                     log::warn!("[relay] [packet] [{assoc_id:#06x}] [from-native] [{pkt_id:#06x}] unable to find socks5 associate session");
                 }
+
+                */
             }
             Ok(None) => {}
             Err(err) => log::warn!("[relay] [packet] [{assoc_id:#06x}] [from-native] [{pkt_id:#06x}] packet receiving error: {err}"),

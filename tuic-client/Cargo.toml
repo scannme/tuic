@@ -37,6 +37,7 @@ tuic = { path = "../tuic", default-features = false }
 tuic-quinn = { path = "../tuic-quinn", default-features = false }
 uuid = { version = "1.3.3", default-features = false, features = ["serde", "std"] }
 futures = "0.3"
+lazy_static = "1.4"
 
 [target.'cfg(any(target_os = "linux",target_os = "macos"))'.dependencies]
 netstack-lwip  = { path="src/tap/netstack-lwip"}

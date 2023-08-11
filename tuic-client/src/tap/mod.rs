@@ -1,18 +1,29 @@
 use crate::{config::Local, error::Error};
 use crate::connection::{Connection as TuicConnection, ERROR_CODE};
 use once_cell::sync::OnceCell;
+
 use parking_lot::Mutex;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-//use netstack_lwip::{NetStack, TcpListener, UdpSocket};
 use tun::{Configuration, r#async::AsyncDevice, TunPacket};
 use tokio::io::{self, AsyncWriteExt};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use futures::{SinkExt, StreamExt, Future};
 use tuic::Address as TuicAddress;
 use tuic_quinn::{Connect, Packet};
+use bytes::Bytes;
+use std::{
+    collections::HashMap,
+    io::{Error as IoError, ErrorKind},
+    sync::{
+        atomic::{AtomicU16, Ordering},
+        Arc,
+    },
+};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use lazy_static::lazy_static;
 
-
-use std::net::SocketAddr;
+pub mod udp_session;
+pub mod handle_task;
 
 pub use netstack_lwip as netstack;
 
@@ -21,6 +32,7 @@ pub struct TapProxy {
     tcp_listener: netstack::TcpListener,
     udp_socket: Box<netstack::UdpSocket>,
     dev: AsyncDevice,
+    next_assoc_id: AtomicU16,
 }
 
 impl TapProxy {
@@ -34,11 +46,23 @@ impl TapProxy {
         let dev = tun::create_as_async(&config).unwrap();
         let (net_stack, mut tcp_listener, udp_socket) = netstack::NetStack::new();
 
+        /* 
+        UDP_SOCKET
+            .set(Arc::new(udp_socket))
+            .map_err(|_| "failed initializing udp recv half")
+            .unwrap();
+
+        UDP_SESSIONS
+            .set(Mutex::new(HashMap::new()))
+            .map_err(|_| "failed initializing UDP session pool")
+            .unwrap();
+        */
         Ok(Self {
             net_stack,
             tcp_listener,
             udp_socket,
             dev,
+            next_assoc_id: AtomicU16::new(0),
         })
     }
 
@@ -81,12 +105,14 @@ impl TapProxy {
 
         // Receive and send UDP packets between netstack and NAT manager. The NAT
         // manager would maintain UDP sessions and send them to the dispatcher.
-        //tokio::spawn(async move {
-        //    handle_inbound_datagram(udp_socket).await;
-        //});
+        tokio::spawn(async move {
+            handle_inbound_datagram(tap_proxy.udp_socket, tap_proxy.next_assoc_id).await;
+        });
         loop {};
     }
 }
+
+
 
 async fn handle_inbound_stream(
     mut stream: netstack::TcpStream,
@@ -101,7 +127,7 @@ async fn handle_inbound_stream(
             Ok(conn) => conn.connect(target_addr.clone()).await,
             Err(err) => Err(err),
         };
-
+        /*todo!后续处理参考下，错误关闭的流程*/
         match relay {
             Ok(relay) => {
                 let mut relay = relay.compat();
@@ -121,42 +147,66 @@ async fn handle_inbound_stream(
             }
         }
     }
+}
 
-    /* 
-    match relay {
-        Ok(relay) => {
-            let mut relay = relay.compat();
+pub static UDP_SOCKET: OnceCell<netstack::SendHalf> = OnceCell::new();
+lazy_static! {
+    static ref GLOBAL_PORT: Mutex<u16> = Mutex::new(0);
+}
+async fn handle_inbound_datagram(socket: Box<netstack::UdpSocket>, next_assoc_id: AtomicU16) {
+    let (ls, mut lr) = socket.split();
 
-            match conn.reply(Reply::Succeeded, Address::unspecified()).await {
-                Ok(mut conn) => match io::copy_bidirectional(&mut stream, &mut relay).await {
-                    Ok(_) => {}
-                    Err(err) => {
-                        let _ = conn.shutdown().await;
-                        let _ = relay.get_mut().reset(ERROR_CODE);
-                        log::warn!("[socks5] [{peer_addr}] [connect] [{target_addr}] TCP stream relaying error: {err}");
-                    }
-                },
-                Err(err) => {
-                    let _ = relay.shutdown().await;
-                    log::warn!("[socks5] [{peer_addr}] [connect] [{target_addr}] command reply error: {err}");
-                }
+    UDP_SOCKET.set(ls);
+
+    //recv datagrams from stack and send To tuic
+    loop {
+        match lr.recv_from().await {
+            Err (e) => {
+                log::warn!("Failed to accept a datagram from netstack: {}", e);
             }
-        }
-        Err(err) => {
-            log::warn!("[socks5] [{peer_addr}] [connect] [{target_addr}] unable to relay TCP stream: {err}");
+            Ok((data, src_addr, dst_addr)) => {
+                log::debug!("Recv udp pkt src:{src_addr}  dst{dst_addr}");
+                println!("Recv udp pkt src:{src_addr} dst{dst_addr}");
+                /* 
+                let entry = UDP_SESSIONS
+                    .get()
+                    .unwrap()
+                    .lock()
+                    .entry(src_addr.port())
+                    .or_insert_with(||
+                        UdpSession::new(next_assoc_id.fetch_add(1, Ordering::Relaxed), src_addr.port()).unwrap()
+                    );
+                */ 
+                let mut port_guard = GLOBAL_PORT.lock();
+                *port_guard = src_addr.port();
 
-            match conn
-                .reply(Reply::GeneralFailure, Address::unspecified())
-                .await
-            {
-                Ok(mut conn) => {
-                    let _ = conn.shutdown().await;
-                }
-                Err(err) => {
-                    log::warn!("[Tap] [{peer_addr}] [connect] [{target_addr}] command reply error: {err}")
-                }
+                let forward = async move {
+
+                    let target_addr = TuicAddress::SocketAddress(dst_addr);
+
+                    match TuicConnection::get().await {
+                        Ok(conn) => conn.packet(data.into(), target_addr, 1).await,
+                        Err(err) => Err(err),
+                    }
+                };
+
+                tokio::spawn(async move {
+                    match forward.await {
+                        Ok(()) => {}
+                        Err(err) => {
+                            log::warn!("[TAP] [associate]failed relaying UDP packet: {err}");
+                        }
+                    }
+                });
             }
         }
     }
-    */
+
+}
+
+pub async fn handle_udp_inbound_datagram(pkt: Bytes, src_addr: SocketAddr) { 
+    let dst_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(240, 0, 0, 1)), *GLOBAL_PORT.lock());
+    println!("Recv udp pkt src:{src_addr} dst{dst_addr}");
+    
+    UDP_SOCKET.get().unwrap().send_to(&pkt, &src_addr, &dst_addr);
 }
