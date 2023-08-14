@@ -130,7 +130,7 @@ impl Connection {
                 println!("[relay] [packet] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] from {addr}");
                 if let Address::SocketAddress(addr) = addr {
                     println!("handle_udp_inbound_datagram {addr}");
-                    tap::handle_udp_inbound_datagram(pkt, addr).await;
+                    tap::handle_udp_inbound_datagram(pkt, addr, assoc_id).await;
                 }
 
             /* 

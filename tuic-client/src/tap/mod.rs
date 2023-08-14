@@ -27,6 +27,8 @@ pub mod handle_task;
 
 pub use netstack_lwip as netstack;
 
+pub static UDP_SESSIONS: OnceCell<Mutex<HashMap<SocketAddr, u16>>> = OnceCell::new();
+
 pub struct TapProxy {
     net_stack: netstack::NetStack,
     tcp_listener: netstack::TcpListener,
@@ -51,12 +53,13 @@ impl TapProxy {
             .set(Arc::new(udp_socket))
             .map_err(|_| "failed initializing udp recv half")
             .unwrap();
+        */
 
         UDP_SESSIONS
             .set(Mutex::new(HashMap::new()))
             .map_err(|_| "failed initializing UDP session pool")
             .unwrap();
-        */
+    
         Ok(Self {
             net_stack,
             tcp_listener,
@@ -106,7 +109,7 @@ impl TapProxy {
         // Receive and send UDP packets between netstack and NAT manager. The NAT
         // manager would maintain UDP sessions and send them to the dispatcher.
         tokio::spawn(async move {
-            handle_inbound_datagram(tap_proxy.udp_socket, tap_proxy.next_assoc_id).await;
+            handle_inbound_datagram(tap_proxy.udp_socket, &tap_proxy.next_assoc_id).await;
         });
         loop {};
     }
@@ -152,8 +155,9 @@ async fn handle_inbound_stream(
 pub static UDP_SOCKET: OnceCell<netstack::SendHalf> = OnceCell::new();
 lazy_static! {
     static ref GLOBAL_PORT: Mutex<u16> = Mutex::new(0);
+    static ref UDP_LIST: HashMap<SocketAddr, u16> = HashMap::new();
 }
-async fn handle_inbound_datagram(socket: Box<netstack::UdpSocket>, next_assoc_id: AtomicU16) {
+async fn handle_inbound_datagram(socket: Box<netstack::UdpSocket>, next_assoc_id: &AtomicU16) {
     let (ls, mut lr) = socket.split();
 
     UDP_SOCKET.set(ls);
@@ -167,25 +171,34 @@ async fn handle_inbound_datagram(socket: Box<netstack::UdpSocket>, next_assoc_id
             Ok((data, src_addr, dst_addr)) => {
                 log::debug!("Recv udp pkt src:{src_addr}  dst{dst_addr}");
                 println!("Recv udp pkt src:{src_addr} dst{dst_addr}");
-                /* 
-                let entry = UDP_SESSIONS
-                    .get()
-                    .unwrap()
-                    .lock()
-                    .entry(src_addr.port())
-                    .or_insert_with(||
-                        UdpSession::new(next_assoc_id.fetch_add(1, Ordering::Relaxed), src_addr.port()).unwrap()
-                    );
-                */ 
-                let mut port_guard = GLOBAL_PORT.lock();
-                *port_guard = src_addr.port();
+        
+                // let mut entry = UDP_SESSIONS
+                //     .get()
+                //     .unwrap()
+                //     .entry(src_addr.clone())
+                //     .or_insert(next_assoc_id.fetch_add(1, Ordering::Relaxed));
+               // let mut udp_sessions = UDP_SESSIONS.get().expect("REASON");
+               let mut udp_session = UDP_SESSIONS.get().unwrap().lock();
 
+                if udp_session.contains_key(&src_addr) == false {
+                    udp_session.insert(src_addr.clone(), next_assoc_id.fetch_add(1, Ordering::Relaxed));
+                }
+
+                for (k, v) in udp_session.iter() {
+                    println!("Session: {k}, {v}");
+                }
+
+                //let assoc_id = udp_session.get(&src_addr).unwrap();
+                let mut assoc_id: u16 = 0;
+                if let Some(assoc_id_ref) = udp_session.get(&src_addr) {
+                    assoc_id = *assoc_id_ref;
+                }
                 let forward = async move {
 
                     let target_addr = TuicAddress::SocketAddress(dst_addr);
 
                     match TuicConnection::get().await {
-                        Ok(conn) => conn.packet(data.into(), target_addr, 1).await,
+                        Ok(conn) => conn.packet(data.into(), target_addr, assoc_id).await,
                         Err(err) => Err(err),
                     }
                 };
@@ -204,9 +217,16 @@ async fn handle_inbound_datagram(socket: Box<netstack::UdpSocket>, next_assoc_id
 
 }
 
-pub async fn handle_udp_inbound_datagram(pkt: Bytes, src_addr: SocketAddr) { 
-    let dst_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(240, 0, 0, 1)), *GLOBAL_PORT.lock());
-    println!("Recv udp pkt src:{src_addr} dst{dst_addr}");
-    
-    UDP_SOCKET.get().unwrap().send_to(&pkt, &src_addr, &dst_addr);
+pub async fn handle_udp_inbound_datagram(pkt: Bytes, src_addr: SocketAddr, assoc_id: u16) { 
+    //let dst_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(240, 0, 0, 1)), *GLOBAL_PORT.lock());
+    println!("Recv udp pkt src:{src_addr} assoc_id {assoc_id}");
+    let mut udp_session = UDP_SESSIONS.get().unwrap().lock();
+    for (addr, id) in udp_session.iter(){
+        println!("list {addr} {id}");
+        if *id == assoc_id {
+            println!("Recv udp pkt src:{src_addr} dst{addr}");
+            UDP_SOCKET.get().unwrap().send_to(&pkt, &src_addr, &addr);
+            break;
+        } 
+    }
 }
